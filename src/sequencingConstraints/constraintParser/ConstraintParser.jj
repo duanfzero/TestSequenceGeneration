@@ -1,0 +1,680 @@
+/* by FengDuan
+ Use JavaCC
+ javacc -OUTPUT_DIRECTORY:..\ ..\ConstraintParser.jj
+ */
+
+/*
+ BNF is:
+	<constraint> ::= <constraint> || <constraint> 
+		| <constraint> && <constraint> 
+		| <constraint> . <constraint> 
+		| !<constraint> 
+		| <constraint> <immediate operator> <constraint> 
+		| <constraint> <general operator> <constraint> # for deprecated general operators
+		| <always operator> <constraint> 
+		| (<constraint>) 
+		| <event set>
+	<event set> ::= {<event list>} | <event>
+	<event list> ::= <event> , <event list> | <event>
+	<always operator> ::= ¡°_¡±
+	<immediate operator> ::= ¡°+-¡± | ¡°-+¡± | ¡°~¡±
+	<general operator> ::= ¡°+...¡± | ¡°...+¡± | ¡°.~.¡± # deprecated
+
+	The event identifiers are basically the set of events that could be exercised.
+	There are two types of operators in high-level: Common and Sequencing operators,
+	while sequencing operators can be divided into three sub-types: always, immediate and general (deprecated). 
+
+	The semantics of each sequencing operator will be defined in next part as an Automaton,
+	while Common operators on constraint can be mapping to the common operations on automata,
+	i.e., NOT "!" = the Complement of the automaton equivalent to constraint,
+	CONCAT "." = the Concatenation of two automata, AND "&&" = Intersection, OR "||" = Union.
+	
+	Notice that the precedence of the operators is defined from highest to lowest as follows:
+	PAREN "()", always operator, immediate (and deprecated general) operators, NOT "!", CONCAT ".", AND "&&", OR "||".
+ */
+/*	
+	Reconsidered the necessary of <event set> as "{E1, E2...}" in operands of sequencing expression,
+	since that in case study of PHD, all its 9 sequencing constraints can be presented in three different
+	forms of notations: "E ...+ {E1, E2...}", "{E1, E2...} +... {E3, E4...}", and
+	"(_ {E1, E2...} && {E1, E2...} .~. {E3, E4...}) -+ {E5, E6...}".
+	These sequencing constraints must be all satisfied by any test sequence for execution.
+	To abbreviate the length of sequencing constraints, event set form is required.
+*/
+ 
+options {
+	static = false;
+}
+
+PARSER_BEGIN(ConstraintParser)
+package sequencingConstraints.constraintParser;
+
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.List;
+
+import sequencingConstraints.*;
+import util.Constants;
+
+public class ConstraintParser {
+
+   // store events
+   private List<String> events;
+      
+   // a list of events that appear in the sequencing constraint
+   private List<String> usedEvents;
+   
+   public ConstraintParser (String constraint, List<String> eventsList) {
+      this(new StringReader (constraint));
+      events = eventsList;
+  
+      usedEvents = new ArrayList<String> ();
+   }
+	
+	// get the list of used events
+	public List<String> getUsedEventsList () {
+		return usedEvents;
+	}
+
+	// Here Ret is a constraint info
+   public TypeInfo parse () throws ParseException {
+	   return ((TypeInfo) ACTConstraint(true));
+   }
+
+	public static void main (String args[]) throws ParseException {
+//		String constraint = "Open ...+ {Close, Read, Write}" + " && " +
+//			"(_ Open && Open .~. Close) -+ {Read, Write, Close}" + " && " +
+//			"{Open, Read, Write} +... Close";
+//		String constraint = "(_ Open && Open .~. Close) -+ {Read, Write, Close}"; // check if nesting is parsed correctly
+//		String constraint = "(_ Open && Open .~. Close -+ {Read, Write, Close})"; // different from above due to precedence
+
+//		// check if NOT and CONCAT operators are parsed correctly as the new BNF
+		String constraint = "(_ Read && !_({Close}.{Read,Write,Close})) +- ((_ Open && {Open} ~ {Write,Close}) -+ Write && _ Write)";
+		
+		List<String> events = new ArrayList<String>();
+	    events.add(new String("Open"));
+	    events.add(new String("Close"));
+	    events.add(new String("Read"));
+	    events.add(new String("Write"));
+	
+	    ConstraintParser parser = new ConstraintParser(constraint, events);
+	    try{
+	      	 System.out.println(constraint);
+	      	 System.out.println(events);
+	      	 TypeInfo ti = parser.parse();
+	    	 
+	    	 String text = ti.getText();
+	    	 System.out.println(text);
+
+			 System.out.println(ti.getConstraint().plainText());
+	    	 
+	    } catch (Exception ex){
+	         System.out.print(ex);
+	    }
+	
+	  }
+
+}
+
+PARSER_END(ConstraintParser)
+
+SKIP:
+{
+   " "
+   | "\t"
+   | "\n"
+   | "\r"
+}
+
+TOKEN: 
+{
+	< OPENBRACE: "{" >
+|
+	< CLOSEBRACE: "}" >
+|
+	< COMMA: "," >
+|
+   < ALWAYS: "_" >
+|
+   < IL: "+-" >
+| 
+   < IR: "-+" >
+|
+   < IN: "~" >
+|
+   < GL: "+..." >
+|
+   < GR: "...+" >
+|
+   < GN: ".~." >
+|
+	< OPENPAREN: "(" >
+|
+	< CLOSEPAREN: ")" >
+|
+	< NOT: "!" >
+|
+	< CONCAT: ".">
+|	
+   < AND:  "&&" >
+|	
+   < OR:  "||" >
+|  
+   < IDENTIFIER: (<LETTER> | <DIGIT>) (<LETTER> | <DIGIT>)*  | "#" | "$">
+|
+// When "_" is used as ALWAYS operator, it should be separated by Whitespace chars.
+// We allow "/" in Event ID to support Mealy Machine transition.
+   < #LETTER: ["A"-"Z", "a"-"z", "_", "/"] > 
+|
+   < #DIGIT: ["0"-"9"] >
+}
+
+Object ACTConstraint (boolean parse_only) :
+{
+   Object rval;
+}
+{
+   (rval = LogicalExpression (parse_only)) {
+     if (parse_only) {
+     	TypeInfo rvalTI = (TypeInfo) rval;
+     	if (rvalTI.getType() != Constants.TYPE_BOOL) {
+     	   throw new ParseException("Boolean expression expected:\n" + rvalTI.getText());
+     	}
+     }
+     return rval;
+   }
+}
+
+Object LogicalExpression (boolean parse_only) :
+{
+   Object rval;
+}
+{
+	(rval = OrExpression (parse_only)) {
+   	 return rval;
+   }
+}
+
+Object OrExpression (boolean parse_only) :
+{
+   Token t = null;
+   Object rval;
+   Object temp;
+   TypeInfo rvalTI = null;
+   TypeInfo tempTI = null;
+}
+{
+   (rval = AndExpression (parse_only))
+   ( (t = <OR>) (temp = AndExpression (parse_only)) {
+       	if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+            
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+	        if(rvalTI.getType() != Constants.TYPE_BOOL) {
+           		throw new ParseException("Boolean type expected: " + rvalTI.getText()
+                                    + "\n" + "   in expression: " + rv.getText());
+        	}
+        	else if(tempTI.getType() != Constants.TYPE_BOOL) {
+            	throw new ParseException("Boolean type expected: " + tempTI.getText()
+                                     + "\n" + "   in expression: " + rv.getText());           
+        	}
+
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+	     } else {
+             rval = new Boolean(
+                   ((Boolean) rval).booleanValue () 
+                   || ((Boolean) temp).booleanValue ());
+         }
+       }
+   ) *
+   {
+       return rval;
+   }
+}
+
+Object AndExpression (boolean parse_only) :
+{
+   Token t = null;
+   Object rval;
+   Object temp;
+   TypeInfo rvalTI = null;
+   TypeInfo tempTI = null;
+}
+{
+   (rval = ConcatExpression (parse_only))
+   ( (t = <AND>) (temp = ConcatExpression (parse_only)) {
+       	if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+            
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+	        if(rvalTI.getType() != Constants.TYPE_BOOL) {
+           		throw new ParseException("Boolean type expected: " + rvalTI.getText()
+                                    + "\n" + "   in expression: " + rv.getText());
+        	}
+        	else if(tempTI.getType() != Constants.TYPE_BOOL) {
+            	throw new ParseException("Boolean type expected: " + tempTI.getText()
+                                     + "\n" + "   in expression: " + rv.getText());           
+        	}
+
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+	     } else {
+             rval = new Boolean(
+                   ((Boolean) rval).booleanValue () 
+                   && ((Boolean) temp).booleanValue ());
+         }
+       }
+   ) *
+   {
+       return rval;
+   }
+}
+
+Object ConcatExpression (boolean parse_only) :
+{
+   Token t = null;
+   Object rval;
+   Object temp;
+   TypeInfo rvalTI = null;
+   TypeInfo tempTI = null;
+}
+{
+   (rval = NotExpression (parse_only))
+   ( (t = <CONCAT>) (temp = NotExpression (parse_only)) {
+       	if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+            
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+	        if(rvalTI.getType() != Constants.TYPE_BOOL) {
+           		throw new ParseException("Boolean type expected: " + rvalTI.getText()
+                                    + "\n" + "   in expression: " + rv.getText());
+        	}
+        	else if(tempTI.getType() != Constants.TYPE_BOOL) {
+            	throw new ParseException("Boolean type expected: " + tempTI.getText()
+                                     + "\n" + "   in expression: " + rv.getText());           
+        	}
+
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+	     }
+       }
+   ) *
+   {
+       return rval;
+   }
+}
+
+Object NotExpression (boolean parse_only) :
+{
+   Token t = null;
+   Token tt = null;
+   Object temp;
+   Object rval = null;
+}
+{	
+  (
+   (t=<NOT>) (rval = TemporalExpression (parse_only)) {
+    if(parse_only) {
+     TypeInfo rvalTI = (TypeInfo) rval;
+     TypeInfo ti = new TypeInfo ();
+     ti.setType (Constants.TYPE_BOOL);
+     ti.setText(t.image + " " + rvalTI.getText());
+
+	 ti.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), null));
+     rval = ti;
+   }
+  }
+ ) 
+  {
+     return rval; 
+  }
+ | 
+  (rval = TemporalExpression (parse_only)) {
+     if (parse_only) {
+     	TypeInfo rvalTI = (TypeInfo) rval;
+     	if (rvalTI.getType() != Constants.TYPE_BOOL) {
+     	   throw new ParseException("Boolean expression expected:\n" + rvalTI.getText());
+     	}
+     }
+     return rval;
+   } 
+}
+
+Object TemporalExpression (boolean parse_only) :
+{
+   Token t = null;
+   Object rval;
+   Object temp;
+   TypeInfo rvalTI = null;
+   TypeInfo tempTI = null;
+}
+{
+ // three immediate temporal expression support nesting
+   (rval = AlwaysExpression (parse_only)) (
+    ( (t=<IR>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+  |
+    ( (t=<IL>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+  |
+    ( (t=<IN>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+
+  | 
+  	// three general temporal expression not support nesting
+    ( (t=<GR>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+  |
+    ( (t=<GL>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+  |
+    ( (t=<GN>) (temp = AlwaysExpression (parse_only)) ) {
+ 	    if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+        
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_BOOL);
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+            
+        	rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+    	} else {
+      		//unable to directly get the boolean value of temporal expression in parser
+           	rval = null;
+      }
+    }
+    
+  ) *
+  {
+    return rval;
+  }
+}
+
+Object AlwaysExpression (boolean parse_only) :
+{
+   Token t = null;
+   Token tt = null;
+   Object temp;
+   Object rval = null;
+}
+{	
+ (
+   (t=<ALWAYS>) (rval = ParenExpression (parse_only)) {
+    if(parse_only) {
+     TypeInfo rvalTI = (TypeInfo) rval;
+     TypeInfo ti = new TypeInfo ();
+     ti.setType (Constants.TYPE_BOOL);
+     ti.setText(t.image + " " + rvalTI.getText());
+
+	 ti.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), null));
+     rval = ti;
+   }
+  }
+  )
+  {
+     return rval; 
+  }
+ | 
+  (rval = ParenExpression (parse_only)) {
+     if (parse_only) {
+     	TypeInfo rvalTI = (TypeInfo) rval;
+     	if(rvalTI.getType() != Constants.TYPE_BOOL) {
+       		throw new ParseException("Boolean expression expected:\n" + rvalTI.getText());
+    	}
+     }
+     return rval;
+   } 
+}
+
+Object ParenExpression (boolean parse_only) :
+{
+   Token t = null;
+   Token tt = null;
+   Object temp;
+   Object rval = null;
+}
+{	// for parentheses, we don't add "(" as operator but only keep precedence
+  (t=<OPENPAREN>) (rval = LogicalExpression (parse_only)) (tt=<CLOSEPAREN>) { 
+   if(parse_only) {
+     TypeInfo rvalTI = (TypeInfo) rval;
+     TypeInfo ti = new TypeInfo ();
+     ti.setType (rvalTI.getType());
+     ti.setText(t.image + rvalTI.getText() + tt.image);
+
+	 ti.setConstraint(rvalTI.getConstraint());
+     rval = ti;
+   }
+  }
+  {
+     return rval; 
+  }
+ | 
+  (rval = EventSetExpression (parse_only)) {
+     if (parse_only) {
+     	TypeInfo rvalTI = (TypeInfo) rval;
+     	if (rvalTI.getType() != Constants.TYPE_BOOL) {
+     	   throw new ParseException("Boolean expression expected:\n" + rvalTI.getText());
+     	}
+     }
+     return rval;
+   } 
+}
+
+Object EventSetExpression (boolean parse_only) :
+{
+   Token t = null;
+   Token tt = null;
+   Object temp;
+   Object rval = null;
+}
+{	
+ (
+  (t=<IDENTIFIER>) {    
+  if(parse_only){
+     boolean isEvent = events.contains(t.image);
+     if (isEvent == false) {
+        throw new ParseException("Unrecognized event: " + t.image
+        		   					+ "\n");
+     } else {	
+        TypeInfo rv = new TypeInfo();
+        rv.setType (Constants.TYPE_BOOL); // event set is considered as Boolean since itself is a constraint
+        
+        rv.setText (t.image);
+
+        rv.setConstraint(new Constraint(t.image, null, null));
+        rval = rv;
+        
+        // add this valid event into usedEvents list
+        usedEvents.add (t.image);	        
+     }	            
+  } else {
+    boolean isEvent = events.contains(t.image);
+    if (isEvent == false) {
+	   throw new ParseException ("Unrecognized event: " + t.image 
+	   								+ "\n");
+    }
+  }
+}
+| (t=<OPENBRACE>) (rval = EventListExpression (parse_only)) (tt=<CLOSEBRACE>) { 
+   if(parse_only) {
+     TypeInfo rvalTI = (TypeInfo) rval;
+     TypeInfo ti = new TypeInfo ();
+     ti.setType (Constants.TYPE_BOOL); // event set is considered as Boolean since itself is a constraint
+     ti.setText(t.image + rvalTI.getText() + tt.image);
+
+	 ti.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), null));
+     rval = ti;
+   }
+  }
+ )
+  {
+     return rval; 
+  }   
+}
+
+Object EventListExpression (boolean parse_only) :
+{
+   Token t = null;
+   Object rval;
+   Object temp;
+   TypeInfo rvalTI = null;
+   TypeInfo tempTI = null;
+}
+{
+  (rval = EventExpression (parse_only))
+   ( (t = <COMMA>) (temp = EventListExpression (parse_only)) {
+       	if(parse_only){
+            tempTI  = (TypeInfo)temp;
+            rvalTI = (TypeInfo)rval;
+            
+            TypeInfo rv = new TypeInfo();
+            rv.setType(Constants.TYPE_EVENT); // type of event set
+            rv.setText(rvalTI.getText() + " " + t.image + " " + tempTI.getText());
+                
+	        if(rvalTI.getType() != Constants.TYPE_EVENT) {
+           		throw new ParseException("Event type expected: " + rvalTI.getText()
+                                    + "\n" + "   in expression: " + rv.getText());
+        	}
+        	else if(tempTI.getType() != Constants.TYPE_EVENT) {
+            	throw new ParseException("Event type expected: " + tempTI.getText()
+                                     + "\n" + "   in expression: " + rv.getText());           
+        	}
+        	
+            rv.setConstraint(new Constraint(t.image, rvalTI.getConstraint(), tempTI.getConstraint()));
+            rval = rv;
+	     } else {
+             rval = new Boolean(
+                   ((Boolean) rval).booleanValue () 
+                   && ((Boolean) temp).booleanValue ());
+         }
+       }
+   ) *
+   {
+       return rval;
+   }
+}
+
+Object EventExpression (boolean parse_only) :
+{
+   Token t = null;
+   Token tt = null;
+   Object temp;
+   Object rval = null;
+}
+{	
+ (
+  (t=<IDENTIFIER>) {    
+  if(parse_only){
+     boolean isEvent = events.contains(t.image);
+     if (isEvent == false) {
+        throw new ParseException("Unrecognized event: " + t.image
+        		   					+ "\n");
+     } else {	
+        TypeInfo rv = new TypeInfo();
+        rv.setType (Constants.TYPE_EVENT);
+        
+        rv.setText (t.image);
+
+        rv.setConstraint(new Constraint(t.image, null, null));
+        rval = rv;
+        
+        // add this valid event into usedEvents list
+        usedEvents.add (t.image);	        
+     }	            
+  } else {
+    boolean isEvent = events.contains(t.image);
+    if (isEvent == false) {
+	   throw new ParseException ("Unrecognized event: " + t.image 
+	   								+ "\n");
+    }
+  }
+ }
+ )
+  {
+     return rval; 
+  }   
+}
+

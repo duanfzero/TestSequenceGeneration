@@ -1,5 +1,5 @@
-# TestSequenceGeneration
-This project is released for further research on t-way sequential testing.
+# Advanced Test Sequence Generation Tool
+This project is released for further research on t-way sequential testing. The main feature is to generate test sequence suite that satisfies t-way sequential coverage.
 
 ### Please read the following paper as user guide
 F. Duan, Chapter 5 "T-way Test Sequence Generation using an Event-Oriented Notation" in "Advanced Algorithms for Combinatorial and Sequential Test Generation with Constraints", PhD dissertation, 2021.  
